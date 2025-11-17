@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgis/postgis:14-3.2
+    container_name: urban_router_db
+    environment:
+      POSTGRES_DB: urban_maintenance
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/infra/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - urban_network
+
+  app:
+    build: .
+    container_name: urban_router_app
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/urban_maintenance
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    networks:
+      - urban_network
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:7-alpine
+    container_name: urban_router_cache
+    ports:
+      - "6379:6379"
+    networks:
+      - urban_network
+
+networks:
+  urban_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
