@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
 from datetime import date
 import asyncio
+import time
 
 from src.core.models.point import MaintenancePoint, TeamType, Priority, ProblemType
 from src.core.algorithms.optimizer import TagBasedOptimizer
@@ -104,6 +105,7 @@ async def optimize_route(request: RouteRequest, db: Database = Depends(get_datab
             status_code=404,
             detail="Nenhum ponto de manutenção encontrado para os critérios fornecidos."
         )
+    start_time = time.time()
     
     optimizer = TagBasedOptimizer(points_to_optimize)
     result = optimizer.optimize_route(
@@ -111,26 +113,47 @@ async def optimize_route(request: RouteRequest, db: Database = Depends(get_datab
         max_hours=request.max_hours
     )
     
+    optimization_time = time.time() - start_time
+    
     from src.core.algorithms.distance import haversine_distance
     
+    AVERAGE_SPEED_KMH = 30  
+    SETUP_TIME_MINUTES = 5  
+    
     enriched_route = []
-    accumulated_time = 0
+    accumulated_time = 0.0
     accumulated_distance = 0.0
+    total_travel_time = 0.0 
     
     for index, point in enumerate(result.route):
         if index > 0:
             prev_point = result.route[index - 1]
-            distance_from_prev = haversine_distance(prev_point.coordinates, point.coordinates)
-            travel_time_from_prev = (distance_from_prev / 30) * 60
-            accumulated_time += travel_time_from_prev + prev_point.estimated_time
+            distance_from_prev = haversine_distance(
+                prev_point.coordinates, 
+                point.coordinates
+            )
+            travel_time_from_prev = (distance_from_prev / AVERAGE_SPEED_KMH) * 60
+            
+            accumulated_time += (
+                prev_point.estimated_time + 
+                travel_time_from_prev + 
+                SETUP_TIME_MINUTES
+            )
             accumulated_distance += distance_from_prev
+            total_travel_time += travel_time_from_prev 
         
         distance_to_next = None
         travel_time_to_next = None
         if index < len(result.route) - 1:
             next_point = result.route[index + 1]
-            distance_to_next = round(haversine_distance(point.coordinates, next_point.coordinates), 2)
-            travel_time_to_next = round((distance_to_next / 30) * 60, 1)
+            distance_to_next = round(
+                haversine_distance(point.coordinates, next_point.coordinates), 
+                2
+            )
+            travel_time_to_next = round(
+                (distance_to_next / AVERAGE_SPEED_KMH) * 60, 
+                1
+            )
         
         enriched_route.append({
             "stop_number": index + 1,
@@ -141,25 +164,45 @@ async def optimize_route(request: RouteRequest, db: Database = Depends(get_datab
             "estimated_time": point.estimated_time,
             "arrival_time_minutes": round(accumulated_time, 1),
             "distance_to_next_km": distance_to_next,
-            "travel_time_to_next_min": travel_time_to_next
+            "travel_time_to_next_min": travel_time_to_next,
+            "coordinates": point.coordinates,
+            "complaints_count": point.complaints_count
         })
     
     total_work_time = sum(p.estimated_time for p in result.route)
-    total_travel_time = result.total_time - total_work_time
+    total_setup_time = len(result.route) * SETUP_TIME_MINUTES
+    
+    total_time_real = total_work_time + total_travel_time + total_setup_time
     
     enhanced_statistics = {
         **result.statistics,
         "total_work_time_minutes": total_work_time,
         "total_travel_time_minutes": round(total_travel_time, 1),
-        "efficiency_points_per_km": round(len(result.route) / result.total_distance, 2) if result.total_distance > 0 else 0,
-        "avg_time_per_point_minutes": round(total_work_time / len(result.route), 1) if result.route else 0,
+        "total_setup_time_minutes": total_setup_time,
+        "total_time_real_minutes": round(total_time_real, 1), 
+        "efficiency_points_per_km": round(
+            len(result.route) / result.total_distance, 2
+        ) if result.total_distance > 0 else 0,
+        "avg_time_per_point_minutes": round(
+            total_work_time / len(result.route), 1
+        ) if result.route else 0,
+        "work_time_percentage": round(
+            (total_work_time / total_time_real * 100), 1
+        ) if total_time_real > 0 else 0,  
+        "travel_time_percentage": round(
+            (total_travel_time / total_time_real * 100), 1
+        ) if total_time_real > 0 else 0,  
     }
+    
+    max_minutes = request.max_hours * 60
+    if total_time_real > max_minutes:
+        enhanced_statistics["warning"] = f"Rota excede tempo máximo em {round(total_time_real - max_minutes, 1)} minutos"
     
     return RouteResponse(
         team_type=result.team_type.value,
         route=enriched_route,
-        total_distance_km=result.total_distance,
-        total_time_minutes=result.total_time,
+        total_distance_km=round(result.total_distance, 2),
+        total_time_minutes=int(round(total_time_real, 1)),  
         statistics=enhanced_statistics,
-        optimization_time_seconds=None
+        optimization_time_seconds=round(optimization_time, 3)  
     )
